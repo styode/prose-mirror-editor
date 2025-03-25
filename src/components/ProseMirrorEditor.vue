@@ -62,18 +62,6 @@ const schema = new Schema({
 // 检查是否在行首
 const isAtLineStart = ($pos) => $pos.parentOffset === 0
 
-// 查找最近的左括号位置
-const findLastOpeningParenthesis = (text) => {
-  const openChineseParen = text.lastIndexOf('（')
-  const openEnglishParen = text.lastIndexOf('(')
-  return Math.max(openChineseParen, openEnglishParen)
-}
-
-// 检查是否有右括号
-const hasClosingParenthesis = (text) => {
-  return text.indexOf('）') >= 0 || text.indexOf(')') >= 0
-}
-
 // ==================== 编辑器插件 ====================
 // 组合输入处理插件
 const compositionPlugin = new Plugin({
@@ -124,9 +112,12 @@ const cursorPlugin = new Plugin({
         const textBefore = $pos.parent.textContent.slice(0, $pos.parentOffset)
         const textAfter = $pos.parent.textContent.slice($pos.parentOffset)
 
-        // 在圆括号内标记为绿色
-        const openParenIndex = findLastOpeningParenthesis(textBefore)
-        if (openParenIndex !== -1 && hasClosingParenthesis(textAfter)) {
+        // 只检查中文括号
+        const chineseOpenPos = textBefore.lastIndexOf('（')
+        const chineseClosePos = textAfter.indexOf('）')
+
+        // 如果在中文括号内，添加绿色标记
+        if (chineseOpenPos !== -1 && chineseClosePos !== -1) {
           marks.add('green')
         }
       }
@@ -214,51 +205,59 @@ const buildInputRules = (schema) => {
       }
     )
 
-    // 圆括号自动补全（不限于行首）
-    const parenthesisRule = new InputRule(/(（|\()$/, (state, match, start, end) => {
-      if (isComposing || Date.now() - lastCompositionEnd < 100) return null
+    // 自动补全括号
+    const parenthesisRule = new InputRule(/（/, (state, match, start, end) => {
+      if (isComposing) return null
 
       const tr = state.tr
-      const isChinese = match[0] === '（'
-      const closeChar = isChinese ? '）' : ')'
+      const $pos = state.doc.resolve(start)
+      const textBefore = $pos.parent.textContent.slice(0, $pos.parentOffset)
+      const textAfter = $pos.parent.textContent.slice($pos.parentOffset)
 
-      // 删除已输入的左括号
+      // 检查是否已经在括号内
+      const chineseOpenPos = textBefore.lastIndexOf('（')
+      const chineseClosePos = textAfter.indexOf('）')
+
+      // 如果已经在括号内，不重复添加
+      if (chineseOpenPos !== -1 && chineseClosePos !== -1) {
+        return null
+      }
+
+      // 删除输入的左括号
       tr.delete(end - 1, end)
-      // 插入完整的左右括号对
-      tr.insertText(match[0] + closeChar)
-      // 将光标放在括号中间，方便用户继续输入
-      const cursorPos = end // 因为我们插入了两个字符但删除了一个，所以光标位置是end
-      tr.setSelection(state.selection.constructor.near(tr.doc.resolve(cursorPos)))
-      // 设置绿色标记，让括号内输入的文本显示为绿色
+      // 插入完整的一对括号
+      tr.insertText('（）', end - 1)
+      // 将光标定位到括号中间
+      tr.setSelection(state.selection.constructor.near(tr.doc.resolve(end)))
+      // 添加绿色标记，用于括号内输入
       tr.setStoredMarks([schema.marks.green.create()])
 
       return tr
     })
 
-    // 圆括号内文本着色
-    const parenthesisContentRule = new InputRule(/(.+?)(）|\))$/, (state, match, start, end) => {
+    // 括号内文本着色
+    const parenthesisContentRule = new InputRule(/\）/, (state, match, start, end) => {
       if (isComposing) return null
 
       const tr = state.tr
-      const text = match[1] // 括号内文本
-      const closeChar = match[2] // 右括号
-      const $pos = state.doc.resolve(start)
+      const $pos = state.doc.resolve(end - 1)
+      const parentStart = $pos.start()
       const textBefore = $pos.parent.textContent.slice(0, $pos.parentOffset)
 
-      const openParenIndex = findLastOpeningParenthesis(textBefore)
-      if (openParenIndex === -1) return null
+      // 查找对应的左括号
+      const openPos = textBefore.lastIndexOf('（')
+      if (openPos === -1) return null
 
-      // 计算括号内文本的起始位置
-      const bracketStart = $pos.start() + openParenIndex + 1
+      // 计算括号内文本范围
+      const from = parentStart + openPos + 1
+      const to = end - 1
 
-      // 只需应用绿色标记，不删除任何内容
-      tr.addMark(bracketStart, end - closeChar.length, schema.marks.green.create())
+      // 检查括号内是否有内容
+      if (from >= to) return null
 
-      // 确保不删除右括号
-      // tr.delete(end - closeChar.length, end)
-      // tr.insertText(closeChar)
-
-      // 清除存储标记，防止后续输入继承绿色
+      // 应用绿色标记到括号内文本
+      tr.addMark(from, to, schema.marks.green.create())
+      // 清除存储标记
       tr.setStoredMarks([])
 
       return tr
@@ -266,34 +265,31 @@ const buildInputRules = (schema) => {
 
     // 括号内实时着色
     const parenthesisLiveRule = new InputRule(/(.*)/, (state, match, start, end) => {
-      // 如果正在中文输入法组合状态，或没有输入内容，不处理
       if (isComposing || match[0].length === 0) return null
 
       const tr = state.tr
       const $pos = state.doc.resolve(start)
+      const parentStart = $pos.start()
       const textBefore = $pos.parent.textContent.slice(0, $pos.parentOffset)
       const textAfter = $pos.parent.textContent.slice($pos.parentOffset)
 
-      // 查找最近的左括号
-      const openParenIndex = findLastOpeningParenthesis(textBefore)
-      if (openParenIndex === -1) return null
+      // 检查是否在中文括号内
+      const chineseOpenPos = textBefore.lastIndexOf('（')
+      const chineseClosePos = textAfter.indexOf('）')
 
-      // 检查是否有右括号
-      if (!hasClosingParenthesis(textAfter)) return null
-
-      // 计算括号内文本范围
-      const bracketStart = $pos.start() + openParenIndex + 1
-
-      // 只对当前输入内容应用绿色标记
-      // 确保不删除或修改现有文本
-      if (end > bracketStart) {
-        tr.addMark(bracketStart, end, schema.marks.green.create())
+      // 只有在中文括号内才应用样式
+      if (chineseOpenPos !== -1 && chineseClosePos !== -1) {
+        const bracketStart = parentStart + chineseOpenPos + 1
+        if (end > bracketStart) {
+          // 只添加样式，不修改文本
+          tr.addMark(bracketStart, end, schema.marks.green.create())
+          // 设置存储标记，后续输入仍为绿色
+          tr.setStoredMarks([schema.marks.green.create()])
+          return tr
+        }
       }
 
-      // 保持存储标记，使后续输入也为绿色
-      tr.setStoredMarks([schema.marks.green.create()])
-
-      return tr
+      return null
     })
 
     return [
